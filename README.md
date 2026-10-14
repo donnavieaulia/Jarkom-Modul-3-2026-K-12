@@ -2110,24 +2110,3 @@ Layanan web mampu menangani beban tinggi berkat cache, sedangkan rate limit efek
 | curl dari gojo ke Data Center `HTTP 000` | Gojo memiliki IP ganda (`192.217.4.20` ikut terpasang) | `ip addr flush dev eth0 scope global` lalu pasang ulang IP yang benar |
 | `/` tidak bergantian maki/panda | Setiap proses worker nginx menyimpan giliran sendiri | Tambahkan `zone ... 64k` di dalam `upstream` |
 
-## Struktur Repository
-
-```
-Jarkom-Modul-3-2026-K-12/
-├── README.md
-├── image/
-│   ├── topologi.png
-│   └── SS11-01-....png ... SS20-07-....png
-└── script/
-    ├── 00-pemulihan-jichi.sh
-    ├── 00-pemulihan-tengen.sh
-    ├── 11-12-utahime.sh
-    ├── 11-12-shoko.sh
-    ├── 13-yaga.sh
-    ├── 13-inumaki.sh
-    ├── 14-web-worker.sh
-    ├── 14-api-worker.sh
-    ├── 15-17-18-geto.sh
-    ├── 16-17-19-gojo.sh
-    └── 99-uji-client.sh
-```
