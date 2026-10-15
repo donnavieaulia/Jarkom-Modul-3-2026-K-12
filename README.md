@@ -1402,7 +1402,7 @@ sh /root/m3-client-check.sh 2>&1 | tee /root/bukti-m3/10-client-setelah-restart.
 
 Jika nanti mengubah DHCP, ubah file sumber `/root/m3-*.conf` dan jalankan `/root/m3-dhcp-apply.sh`; boot membaca sumber yang sama. Mengedit hanya file hasil salinan `/etc/dhcp/` akan tertimpa sumber `/root` pada startup berikutnya.
 
-## Daftar screenshot untuk laporan
+## Daftar screenshot
 
 | Soal | Console untuk SS | Bukti utama |
 |---|---|---|
