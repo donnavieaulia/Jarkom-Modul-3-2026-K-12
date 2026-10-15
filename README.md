@@ -1,4 +1,1444 @@
+# Modul 3 K12 - Konfigurasi Soal 1-10
 
+**Prefix: `192.217` | Kelompok: `K12` | Domain-search: `k12.com` | Mask: `/24`.**
+
+## Pemetaan IP dan console
+
+| Node | Interface dan IP | Gateway | Peran |
+|---|---|---|---|
+| jichi | eth0: DHCP dari NAT | dari NAT | WAN |
+| jichi | eth1: 192.217.1.1/24 | - | Gateway Network 1 |
+| jichi | eth2: 192.217.2.1/24 | - | Gateway Network 2 |
+| jichi | eth3: 192.217.3.1/24 | - | Gateway Network 3 |
+| jichi | eth4: 192.217.4.1/24 | - | Gateway Network 4 |
+| utahime | eth0: 192.217.1.2/24 | 192.217.1.1 | DNS master |
+| shoko | eth0: 192.217.1.3/24 | 192.217.1.1 | DNS slave |
+| gojo | eth0: 192.217.1.4/24 | 192.217.1.1 | Public reverse proxy |
+| tengen | eth0: 192.217.4.10/24 | 192.217.4.1 | DHCP server |
+| geto | eth0: 192.217.4.20/24 | 192.217.4.1 | Internal load balancer |
+| maki | eth0: 192.217.4.21/24 | 192.217.4.1 | Frontend |
+| panda | eth0: 192.217.4.22/24 | 192.217.4.1 | Frontend |
+| nanami | eth0: 192.217.4.31/24 | 192.217.4.1 | API utama |
+| todo | eth0: 192.217.4.32/24 | 192.217.4.1 | API utama |
+| kirara | eth0: 192.217.4.33/24 | 192.217.4.1 | API cadangan |
+| yaga | eth0: 192.217.4.40/24 | 192.217.4.1 | Database master |
+| inumaki | eth0: 192.217.4.41/24 | 192.217.4.1 | Database slave |
+
+### MAC dan kebijakan client
+
+Agar tidak perlu mengisi MAC secara manual, script client **menetapkan MAC lokal berikut pada eth0**. MAC ini berbeda untuk setiap client dan dipakai oleh DHCP class/reservasi. Jangan memakai MAC yang sama pada dua node. Jika panduan ini diterapkan lagi setelah restart client, script menetapkan MAC yang sama.
+
+| Client | MAC eth0 yang ditetapkan | IP yang diperbolehkan sesudah nomor 6 | Lease |
+|---|---|---|---|
+| itadori | 02:12:03:02:00:01 | 192.217.2.10-192.217.2.35 | default 3600, maksimum 7200 detik |
+| fushiguro | 02:12:03:02:00:02 | 192.217.2.10-192.217.2.35 | default 3600, maksimum 7200 detik |
+| zenin | 02:12:03:02:00:03 | 192.217.2.70-192.217.2.95 | default 3600, maksimum 7200 detik |
+| okkotsu | 02:12:03:02:00:04 | 192.217.2.70-192.217.2.95 | default 3600, maksimum 7200 detik |
+| ino | 02:12:03:03:00:01 | 192.217.3.10-192.217.3.89 | 1800 detik |
+| kusakabe | 02:12:03:03:00:02 | 192.217.3.10-192.217.3.89 | 1800 detik |
+| miwa | 02:12:03:03:00:03 | 192.217.3.100-192.217.3.199 | 43200 detik |
+| kugisaki | 02:12:03:03:00:04 | **192.217.3.99**, melalui DHCP | default 3600 detik |
+
+IP client dinamis boleh berbeda dalam rentang yang benar. Jangan mengharuskan Itadori selalu mendapat `.10`. Rentang `192.217.2.36-192.217.2.69` tidak dimasukkan ke pool mana pun. Alamat Kugisaki `.3.99` berada di luar kedua pool Network 3.
+
+## 1. IP statis, IPv4 forwarding, source NAT, dan konektivitas
+
+### Konfigurasi
+
+**Salin blok ini ke SEMUA 13 NODE DEBIAN**, satu per satu: jichi, utahime, shoko, gojo, tengen, geto, maki, panda, nanami, todo, kirara, yaga, inumaki. Setelah menyalin, jalankan satu command sesuai tabel sesudah blok. Kerjakan **jichi terlebih dahulu**, baru host lainnya.
+
+```bash
+# CONSOLE: SETIAP NODE DEBIAN; MEMBUAT SCRIPT, BELUM MENJALANKANNYA
+cat > /root/m3-network.sh <<'M3_NETWORK'
+#!/bin/bash
+set -euo pipefail
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+[[ $(id -u) == 0 ]] || { echo 'Jalankan sebagai root.'; exit 1; }
+role=${1:-$(cat /root/m3-role 2>/dev/null || true)}
+mode=${2:-configure}
+case "$role" in
+    jichi) address='' ;;
+    utahime) address=192.217.1.2 ;;
+    shoko) address=192.217.1.3 ;;
+    gojo) address=192.217.1.4 ;;
+    tengen) address=192.217.4.10 ;;
+    geto) address=192.217.4.20 ;;
+    maki) address=192.217.4.21 ;;
+    panda) address=192.217.4.22 ;;
+    nanami) address=192.217.4.31 ;;
+    todo) address=192.217.4.32 ;;
+    kirara) address=192.217.4.33 ;;
+    yaga) address=192.217.4.40 ;;
+    inumaki) address=192.217.4.41 ;;
+    *) echo 'Peran tidak dikenal. Gunakan command sesuai tabel panduan.'; exit 1 ;;
+esac
+mkdir -p /root/modul3-state/backups /root/modul3-state/debs/partial /root/bukti-m3
+if [[ ! -f /root/modul3-state/backups/interfaces.awal && -f /etc/network/interfaces ]]; then
+    cp /etc/network/interfaces /root/modul3-state/backups/interfaces.awal
+fi
+printf '%s\n' "$role" > /root/m3-role
+printf '%s\n' "$role" > /etc/hostname
+hostname "$role"
+ip link set lo up
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+cat > /etc/network/interfaces <<'LOOPBACK'
+auto lo
+iface lo inet loopback
+LOOPBACK
+
+if [[ "$role" == jichi ]]; then
+    for n in 0 1 2 3 4; do
+        ip link show "eth$n" >/dev/null 2>&1 || {
+            echo "eth$n tidak ada. Jichi perlu 5 adapter: eth0-eth4."; exit 1;
+        }
+    done
+    cat >> /etc/network/interfaces <<'WAN'
+
+auto eth0
+iface eth0 inet dhcp
+WAN
+    for n in 1 2 3 4; do
+        cat >> /etc/network/interfaces <<NET
+
+auto eth$n
+iface eth$n inet static
+    address 192.217.$n.1
+    netmask 255.255.255.0
+    broadcast 192.217.$n.255
+NET
+        ip link set "eth$n" up
+        ip -4 addr flush dev "eth$n" scope global
+        ip addr add "192.217.$n.1/24" broadcast "192.217.$n.255" dev "eth$n"
+    done
+    cat > /root/m3-wan-hook.sh <<'WAN_HOOK'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    deconfig)
+        ip -4 addr flush dev "$interface" scope global
+        ;;
+    bound|renew)
+        ip -4 addr flush dev "$interface" scope global
+        if [ -n "${mask:-}" ]; then
+            ip addr add "$ip/$mask" dev "$interface"
+        else
+            ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}"
+        fi
+        for gw in ${router:-}; do
+            ip route replace default via "$gw" dev "$interface"
+            break
+        done
+        printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+        ;;
+esac
+WAN_HOOK
+    chmod +x /root/m3-wan-hook.sh
+    ip link set eth0 up
+    if ! ip -4 addr show eth0 | grep -q 'inet ' || ! ip -4 route show default | grep -q 'dev eth0'; then
+        if command -v udhcpc >/dev/null; then
+            udhcpc -i eth0 -n -t 5 -T 2 -p /run/m3-wan.pid -s /root/m3-wan-hook.sh
+        elif command -v dhclient >/dev/null; then
+            dhclient eth0
+        elif command -v ifup >/dev/null; then
+            ifup --force eth0
+        else
+            echo 'DHCP client WAN tidak tersedia. Periksa image debinet dan koneksi NAT.'; exit 1
+        fi
+    fi
+else
+    gateway=${address%.*}.1
+    cat >> /etc/network/interfaces <<NET
+
+auto eth0
+iface eth0 inet static
+    address $address
+    netmask 255.255.255.0
+    broadcast ${address%.*}.255
+    gateway $gateway
+NET
+    ip link set eth0 up
+    ip -4 addr flush dev eth0 scope global
+    ip addr add "$address/24" broadcast "${address%.*}.255" dev eth0
+    ip route replace default via "$gateway" dev eth0
+fi
+
+if [[ "$mode" != runtime ]]; then
+    apt-get -o Acquire::Retries=3 update
+    packages=(iproute2 iputils-ping procps)
+    [[ "$role" != jichi ]] || packages+=(iptables udhcpc ifupdown tcpdump)
+    apt-get -o Acquire::Retries=3 \
+        -o Dir::Cache::archives=/root/modul3-state/debs \
+        -o APT::Keep-Downloaded-Packages=true install -y "${packages[@]}"
+fi
+if [[ "$role" == jichi ]]; then
+    mkdir -p /etc/sysctl.d
+    printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-modul3-router.conf
+    sysctl -w net.ipv4.ip_forward=1
+    iptables -t nat -C POSTROUTING -s 192.217.0.0/16 -o eth0 -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s 192.217.0.0/16 -o eth0 -j MASQUERADE
+    iptables -C FORWARD -s 192.217.0.0/16 -j ACCEPT 2>/dev/null || \
+        iptables -I FORWARD 1 -s 192.217.0.0/16 -j ACCEPT
+    iptables -C FORWARD -d 192.217.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+        iptables -I FORWARD 1 -d 192.217.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+fi
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+hostname
+ip -br -4 addr
+ip -4 route
+echo 'Konfigurasi jaringan selesai.'
+M3_NETWORK
+chmod +x /root/m3-network.sh
+```
+
+**Jalankan hanya command pada baris node yang sedang dibuka.** Nama node tidak ditebak dari hostname bawaan container.
+
+| Console | Command setelah blok di atas |
+|---|---|
+| jichi, pertama | `bash /root/m3-network.sh jichi` |
+| utahime | `bash /root/m3-network.sh utahime` |
+| shoko | `bash /root/m3-network.sh shoko` |
+| gojo | `bash /root/m3-network.sh gojo` |
+| tengen | `bash /root/m3-network.sh tengen` |
+| geto | `bash /root/m3-network.sh geto` |
+| maki | `bash /root/m3-network.sh maki` |
+| panda | `bash /root/m3-network.sh panda` |
+| nanami | `bash /root/m3-network.sh nanami` |
+| todo | `bash /root/m3-network.sh todo` |
+| kirara | `bash /root/m3-network.sh kirara` |
+| yaga | `bash /root/m3-network.sh yaga` |
+| inumaki | `bash /root/m3-network.sh inumaki` |
+
+**Delapan client Alpine tidak diberi IP statis.** Konfigurasinya dimulai pada nomor 3; bukti gateway/internet client diambil setelah DHCP aktif.
+
+### Check untuk bukti SS - jichi
+
+```bash
+# CONSOLE: JICHI
+mkdir -p /root/bukti-m3
+{
+    date -Is
+    hostname
+    ip -br -4 addr
+    ip -4 route
+    sysctl net.ipv4.ip_forward
+    iptables -t nat -S POSTROUTING
+    iptables -S FORWARD
+    ping -c 3 -W 2 1.1.1.1
+} 2>&1 | tee /root/bukti-m3/01-jichi.txt
+```
+
+**Harus terlihat:** WAN eth0 mendapat IP NAT, empat gateway `.1.1` sampai `.4.1`, forwarding `= 1`, MASQUERADE keluar **eth0**, dan ping eksternal mendapat balasan.
+
+### Check untuk bukti SS - semua 12 host infrastruktur selain jichi
+
+```bash
+# CONSOLE: UTAHIME, SHOKO, GOJO, TENGEN, GETO, MAKI, PANDA,
+# NANAMI, TODO, KIRARA, YAGA, INUMAKI; SATU PER SATU
+mkdir -p /root/bukti-m3
+{
+    date -Is
+    hostname
+    ip -br -4 addr
+    ip -4 route
+    gw=$(ip -4 route show default | awk 'NR==1 {print $3}')
+    if [ -n "$gw" ]; then ping -c 2 -W 2 "$gw"; else echo 'GAGAL: gateway tidak ada.'; fi
+    ping -c 2 -W 2 192.217.4.10
+    ping -c 2 -W 2 1.1.1.1
+} 2>&1 | tee /root/bukti-m3/01-host.txt
+```
+
+**Harus terlihat:** alamat sesuai tabel, gateway sesuai subnet, dan ping berhasil. Ping tengen dari tengen sendiri adalah pemeriksaan alamat lokal; gunakan pula ping dari utahime/gojo untuk membuktikan komunikasi antarsegmen.
+
+## 2. ISC DHCP Server pada tengen dan deklarasi subnet lokal
+
+### Konfigurasi - hanya tengen
+
+Blok ini memasang server dan menyiapkan scope awal Network 2-3. **Pemisahan class dan lease diterapkan pada nomor 4-6.** Network 4 dideklarasikan tanpa range. Jangan menjalankan ulang blok nomor 2 setelah nomor 4-6, karena blok ini mengembalikan scope awal.
+
+```bash
+# CONSOLE: TENGEN
+cat > /root/m3-02-server.sh <<'M3_SERVER_SETUP'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Blok ini hanya untuk tengen.'; exit 1; }
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 \
+    -o Dir::Cache::archives=/root/modul3-state/debs \
+    -o APT::Keep-Downloaded-Packages=true \
+    install -y isc-dhcp-server tcpdump python3 procps
+service isc-dhcp-server stop 2>/dev/null || true
+pkill -x dhcpd 2>/dev/null || true
+mkdir -p /etc/dhcp /var/lib/dhcp /root/modul3-state /root/bukti-m3
+if [[ ! -f /root/modul3-state/dhcpd.leases ]]; then
+    if [[ -f /var/lib/dhcp/dhcpd.leases ]]; then
+        cp /var/lib/dhcp/dhcpd.leases /root/modul3-state/dhcpd.leases
+    else
+        : > /root/modul3-state/dhcpd.leases
+    fi
+fi
+ln -sfn /root/modul3-state/dhcpd.leases /var/lib/dhcp/dhcpd.leases
+cat > /etc/default/isc-dhcp-server <<'SERVER_DEFAULT'
+INTERFACESv4="eth0"
+INTERFACESv6=""
+SERVER_DEFAULT
+cat > /root/m3-dhcpd.conf <<'DHCP_MAIN'
+authoritative;
+ddns-update-style none;
+default-lease-time 3600;
+max-lease-time 7200;
+dhcp-cache-threshold 0;
+server-identifier 192.217.4.10;
+option domain-name "k12.com";
+option domain-search "k12.com";
+option domain-name-servers 192.217.1.2, 192.217.1.3;
+
+# Tengen berada di subnet ini. Sengaja TANPA range/pool dinamis.
+subnet 192.217.4.0 netmask 255.255.255.0 {
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.4.1;
+    option broadcast-address 192.217.4.255;
+}
+include "/etc/dhcp/m3-class-a.conf";
+include "/etc/dhcp/m3-class-b.conf";
+include "/etc/dhcp/m3-net2.conf";
+include "/etc/dhcp/m3-net3.conf";
+include "/etc/dhcp/m3-fixed.conf";
+DHCP_MAIN
+printf '# Class Divisi A akan diterapkan pada nomor 4.\n' > /root/m3-class-a.conf
+printf '# Class Divisi B akan diterapkan pada nomor 5.\n' > /root/m3-class-b.conf
+printf '# Reservasi Kugisaki akan diterapkan pada nomor 6.\n' > /root/m3-fixed.conf
+cat > /root/m3-net2.conf <<'DHCP_NET2_AWAL'
+subnet 192.217.2.0 netmask 255.255.255.0 {
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.2.1;
+    option broadcast-address 192.217.2.255;
+    pool { range 192.217.2.10 192.217.2.35; }
+    pool { range 192.217.2.70 192.217.2.95; }
+}
+DHCP_NET2_AWAL
+cat > /root/m3-net3.conf <<'DHCP_NET3_AWAL'
+subnet 192.217.3.0 netmask 255.255.255.0 {
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.3.1;
+    option broadcast-address 192.217.3.255;
+    pool { range 192.217.3.10 192.217.3.89; }
+    pool { range 192.217.3.100 192.217.3.199; }
+}
+DHCP_NET3_AWAL
+
+cat > /root/m3-dhcp-control.sh <<'DHCP_CONTROL'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Hanya untuk tengen.'; exit 1; }
+action=${1:-status}
+mkdir -p /run /var/lib/dhcp /root/modul3-state
+validate() { /usr/sbin/dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf; }
+stop_server() {
+    pkill -TERM -x dhcpd 2>/dev/null || true
+    for ((i=0; i<30; i++)); do
+        pgrep -x dhcpd >/dev/null || break
+        sleep 0.1
+    done
+    if pgrep -x dhcpd >/dev/null; then echo 'DHCP server belum berhenti.'; return 1; fi
+    rm -f /run/dhcpd.pid
+}
+start_server() {
+    validate
+    if pgrep -x dhcpd >/dev/null; then echo 'DHCP server sudah berjalan.'; return 0; fi
+    [[ -f /root/modul3-state/dhcpd.leases ]] || touch /root/modul3-state/dhcpd.leases
+    ln -sfn /root/modul3-state/dhcpd.leases /var/lib/dhcp/dhcpd.leases
+    echo "START $(date -Is)" >> /root/m3-dhcpd.log
+    nohup /usr/sbin/dhcpd -4 -d -cf /etc/dhcp/dhcpd.conf \
+        -lf /root/modul3-state/dhcpd.leases -pf /run/dhcpd.pid eth0 \
+        >> /root/m3-dhcpd.log 2>&1 < /dev/null &
+    sleep 1
+    pgrep -x dhcpd >/dev/null || { tail -n 50 /root/m3-dhcpd.log; return 1; }
+    echo 'DHCP SERVER AKTIF'
+}
+case "$action" in
+    start) start_server ;;
+    stop) stop_server; echo 'DHCP SERVER BERHENTI' ;;
+    restart) validate; stop_server; start_server ;;
+    validate) validate ;;
+    status)
+        date -Is
+        hostname
+        pgrep -a -x dhcpd || { echo 'DHCP SERVER TIDAK AKTIF'; exit 1; }
+        ss -lunp | grep -E ':67([[:space:]]|$)'
+        ;;
+    *) echo 'Gunakan start|stop|restart|validate|status'; exit 1 ;;
+esac
+DHCP_CONTROL
+
+cat > /root/m3-dhcp-apply.sh <<'DHCP_APPLY'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Hanya untuk tengen.'; exit 1; }
+mkdir -p /etc/dhcp
+for name in class-a class-b net2 net3 fixed; do
+    cp "/root/m3-$name.conf" "/etc/dhcp/m3-$name.conf"
+done
+cp /root/m3-dhcpd.conf /etc/dhcp/dhcpd.conf
+bash /root/m3-dhcp-control.sh validate
+bash /root/m3-dhcp-control.sh restart
+DHCP_APPLY
+chmod +x /root/m3-dhcp-control.sh /root/m3-dhcp-apply.sh
+bash /root/m3-dhcp-apply.sh
+M3_SERVER_SETUP
+chmod +x /root/m3-02-server.sh
+bash /root/m3-02-server.sh
+```
+
+File lease yang aktif disimpan di `/root/modul3-state/dhcpd.leases` agar dapat bertahan pada volume `/root`. Path yang diminta soal, `/var/lib/dhcp/dhcpd.leases`, menjadi symlink ke file yang sama. Script tidak mengosongkan lease saat restart.
+
+### Check untuk bukti SS - tengen
+
+```bash
+# CONSOLE: TENGEN
+{
+    date -Is
+    hostname
+    ip -br -4 addr
+    ip -4 route
+    cat /etc/default/isc-dhcp-server
+    dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+    echo "Exit validasi: $?"
+    sed -n '1,22p' /etc/dhcp/dhcpd.conf
+    cat /etc/dhcp/m3-net2.conf /etc/dhcp/m3-net3.conf
+    bash /root/m3-dhcp-control.sh status
+    tail -n 15 /root/m3-dhcpd.log
+} 2>&1 | tee /root/bukti-m3/02-server.txt
+```
+
+**Harus terlihat:** tengen `192.217.4.10/24`, default gateway `.4.1`, validasi exit `0`, proses `dhcpd` aktif di eth0, port UDP 67, dan subnet `192.217.4.0` tanpa range. Log start terbaru tidak mengandung error **No subnet declaration**. Baris copyright dari `dhcpd -t` adalah output normal.
+
+## 3. DHCP Relay pada jichi dan lease dari kedua subnet
+
+### Konfigurasi - jichi
+
+`eth2` dan `eth3` menjadi sisi client (**downstream**); `eth4` menjadi sisi server (**upstream**). Server tujuan tetap tengen `.4.10`. Source NAT nomor 1 hanya keluar WAN eth0, sehingga trafik internal DHCP tidak ikut di-MASQUERADE.
+
+```bash
+# CONSOLE: JICHI
+cat > /root/m3-03-relay.sh <<'M3_RELAY_SETUP'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+[[ $(cat /root/m3-role) == jichi ]] || { echo 'Hanya untuk jichi.'; exit 1; }
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 \
+    -o Dir::Cache::archives=/root/modul3-state/debs \
+    -o APT::Keep-Downloaded-Packages=true install -y isc-dhcp-relay procps tcpdump
+service isc-dhcp-relay stop 2>/dev/null || true
+pkill -x dhcrelay 2>/dev/null || true
+cat > /etc/default/isc-dhcp-relay <<'RELAY_DEFAULT'
+SERVERS="192.217.4.10"
+INTERFACES=""
+OPTIONS="-4 -id eth2 -id eth3 -iu eth4"
+RELAY_DEFAULT
+cat > /root/m3-relay-control.sh <<'RELAY_CONTROL'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == jichi ]] || { echo 'Hanya untuk jichi.'; exit 1; }
+action=${1:-status}
+start_relay() {
+    if pgrep -x dhcrelay >/dev/null; then echo 'DHCP relay sudah berjalan.'; return 0; fi
+    for iface in eth2 eth3 eth4; do ip link show "$iface" >/dev/null; done
+    echo "START $(date -Is)" >> /root/m3-relay.log
+    nohup /usr/sbin/dhcrelay -4 -d -id eth2 -id eth3 -iu eth4 \
+        -pf /run/dhcrelay.pid 192.217.4.10 \
+        >> /root/m3-relay.log 2>&1 < /dev/null &
+    sleep 1
+    pgrep -x dhcrelay >/dev/null || { tail -n 50 /root/m3-relay.log; return 1; }
+    echo 'DHCP RELAY AKTIF'
+}
+stop_relay() {
+    pkill -TERM -x dhcrelay 2>/dev/null || true
+    for ((i=0; i<30; i++)); do
+        pgrep -x dhcrelay >/dev/null || break
+        sleep 0.1
+    done
+    if pgrep -x dhcrelay >/dev/null; then echo 'Relay belum berhenti.'; return 1; fi
+    rm -f /run/dhcrelay.pid
+}
+case "$action" in
+    start) start_relay ;;
+    stop) stop_relay; echo 'DHCP RELAY BERHENTI' ;;
+    restart) stop_relay; start_relay ;;
+    status)
+        date -Is
+        hostname
+        pgrep -a -x dhcrelay || { echo 'DHCP RELAY TIDAK AKTIF'; exit 1; }
+        ss -lunp | grep -E ':67([[:space:]]|$)'
+        ;;
+    *) echo 'Gunakan start|stop|restart|status'; exit 1 ;;
+esac
+RELAY_CONTROL
+chmod +x /root/m3-relay-control.sh
+for iface in eth2 eth3 eth4; do
+    iptables -C INPUT -i "$iface" -p udp --dport 67 -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT 1 -i "$iface" -p udp --dport 67 -j ACCEPT
+done
+bash /root/m3-relay-control.sh start
+M3_RELAY_SETUP
+chmod +x /root/m3-03-relay.sh
+bash /root/m3-03-relay.sh
+```
+
+### Persiapan script client - semua delapan client Alpine
+
+**Salin blok berikut ke itadori, fushiguro, zenin, okkotsu, ino, kusakabe, miwa, dan kugisaki**, satu per satu. Script memakai tool bawaan BusyBox sehingga tidak perlu mengunduh paket sebelum DNS nomor 11 aktif.
+
+```sh
+# CONSOLE: SETIAP CLIENT ALPINE; MEMBUAT SCRIPT DAHULU
+cat > /root/m3-client-hook.sh <<'M3_CLIENT_HOOK'
+#!/bin/sh
+set -eu
+mkdir -p /root/bukti-m3
+case "${1:-}" in
+    deconfig)
+        ip -4 addr flush dev "$interface" scope global
+        ip route del default dev "$interface" 2>/dev/null || true
+        rm -f /root/m3-lastlease.txt
+        : > /etc/resolv.conf
+        ;;
+    bound|renew)
+        [ "${subnet:-}" = 255.255.255.0 ] || {
+            echo "GAGAL: subnet-mask DHCP bukan /24: ${subnet:-kosong}" >&2; exit 1;
+        }
+        ip -4 addr flush dev "$interface" scope global
+        ip addr add "$ip/24" broadcast "${broadcast:-${ip%.*}.255}" dev "$interface"
+        ip route del default dev "$interface" 2>/dev/null || true
+        for gw in ${router:-}; do
+            ip route add default via "$gw" dev "$interface"
+            break
+        done
+        {
+            [ -z "${search:-}" ] || printf 'search %s\n' "$search"
+            for ns in ${dns:-}; do printf 'nameserver %s\n' "$ns"; done
+        } > /etc/resolv.conf
+        {
+            printf 'event=%s\n' "$1"
+            printf 'time=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            printf 'hostname=%s\n' "$(cat /root/m3-role)"
+            printf 'mac=%s\n' "$(cat /sys/class/net/eth0/address)"
+            printf 'ip=%s\n' "$ip"
+            printf 'subnet=%s\n' "${subnet:-}"
+            printf 'broadcast=%s\n' "${broadcast:-}"
+            printf 'router=%s\n' "${router:-}"
+            printf 'dns=%s\n' "${dns:-}"
+            printf 'domain=%s\n' "${domain:-}"
+            printf 'search=%s\n' "${search:-}"
+            printf 'serverid=%s\n' "${serverid:-}"
+            printf 'lease=%s\n' "${lease:-}"
+        } > /root/m3-lastlease.txt
+        cp /root/m3-lastlease.txt /root/bukti-m3/lastlease.txt
+        ;;
+esac
+M3_CLIENT_HOOK
+
+cat > /root/m3-client.sh <<'M3_CLIENT_SCRIPT'
+#!/bin/sh
+set -eu
+action=${1:-check}
+if [ "$action" = setup ]; then
+    role=${2:?Nama client wajib diberikan}
+else
+    role=$(cat /root/m3-role)
+fi
+case "$role" in
+    itadori) mac=02:12:03:02:00:01 ;;
+    fushiguro) mac=02:12:03:02:00:02 ;;
+    zenin) mac=02:12:03:02:00:03 ;;
+    okkotsu) mac=02:12:03:02:00:04 ;;
+    ino) mac=02:12:03:03:00:01 ;;
+    kusakabe) mac=02:12:03:03:00:02 ;;
+    miwa) mac=02:12:03:03:00:03 ;;
+    kugisaki) mac=02:12:03:03:00:04 ;;
+    *) echo 'Nama client tidak dikenal.'; exit 1 ;;
+esac
+mkdir -p /root/bukti-m3 /run
+fresh_lease() {
+    # Hentikan client lama, termasuk yang mungkin dibuat otomatis oleh image.
+    # Hanya digunakan pada client Alpine satu interface, BUKAN pada jichi.
+    # USR2 meminta RELEASE pada semua daemon lama di client ini, termasuk
+    # daemon bawaan image, agar lease dari MAC lama tidak tertinggal aktif.
+    killall -USR2 udhcpc 2>/dev/null || true
+    sleep 1
+    killall udhcpc 2>/dev/null || true
+    sleep 1
+    rm -f /run/m3-udhcpc.pid /root/m3-lastlease.txt
+    ip link set eth0 down
+    ip -4 addr flush dev eth0 scope global
+    ip route del default dev eth0 2>/dev/null || true
+    ip link set eth0 address "$mac"
+    ip link set eth0 up
+    printf 'DHCP baru untuk %s, MAC %s\n' "$role" "$mac"
+    # Tidak memakai -r IP lama. Proses baru memulai DISCOVER, bukan renew unicast.
+    # Tidak memakai -q: sesudah ACK, daemon tetap aktif untuk memperbarui lease.
+    if udhcpc -i eth0 -n -t 4 -T 2 -p /run/m3-udhcpc.pid \
+        -s /root/m3-client-hook.sh -O 119 -x "hostname:$role" \
+        > /root/m3-udhcpc.log 2>&1; then
+        cat /root/m3-udhcpc.log
+        [ -s /root/m3-lastlease.txt ] || { echo 'ACK/hook belum menghasilkan data lease.'; return 1; }
+        cat /root/m3-lastlease.txt
+    else
+        cat /root/m3-udhcpc.log
+        echo 'GAGAL MEMPEROLEH LEASE BARU. Periksa server, relay, MAC, dan class.'
+        return 1
+    fi
+}
+case "$action" in
+    setup)
+        printf '%s\n' "$role" > /root/m3-role
+        printf '%s\n' "$role" > /etc/hostname
+        hostname "$role"
+        cat > /etc/network/interfaces <<NET
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+    pre-up ip link set eth0 address $mac
+    up /bin/sh /root/m3-client.sh renew
+NET
+        fresh_lease
+        ;;
+    renew) fresh_lease ;;
+    check)
+        date -u '+%Y-%m-%dT%H:%M:%SZ'
+        hostname
+        printf 'MAC eth0: '; cat /sys/class/net/eth0/address
+        ip -4 addr show dev eth0
+        ip -4 route
+        echo 'OPTIONS DARI DHCPACK TERAKHIR:'
+        cat /root/m3-lastlease.txt 2>/dev/null || echo 'Belum ada lease aktif hasil script.'
+        echo 'RESOLVER:'
+        cat /etc/resolv.conf
+        ;;
+    *) echo 'Gunakan setup NAMA|renew|check'; exit 1 ;;
+esac
+M3_CLIENT_SCRIPT
+chmod +x /root/m3-client-hook.sh /root/m3-client.sh
+```
+
+**Nomor 3: cukup jalankan pada dua client berikut untuk membuktikan kedua subnet.** Client lainnya dijalankan pada nomor 4-6.
+
+```sh
+# CONSOLE: ITADORI
+sh /root/m3-client.sh setup itadori
+```
+
+```sh
+# CONSOLE: INO
+sh /root/m3-client.sh setup ino
+```
+
+Pada tahap ini IP Itadori dapat berasal dari salah satu pool awal Network 2, dan lease Ino belum 1800 detik. Itu diperbaiki oleh class pada nomor 4-5.
+
+### Check untuk bukti SS - jichi
+
+```bash
+# CONSOLE: JICHI
+{
+    date -Is
+    hostname
+    cat /etc/default/isc-dhcp-relay
+    bash /root/m3-relay-control.sh status
+    tail -n 20 /root/m3-relay.log
+} 2>&1 | tee /root/bukti-m3/03-relay.txt
+```
+
+### Check untuk bukti SS - Itadori dan Ino
+
+```sh
+# CONSOLE: ITADORI, LALU ULANGI DI INO
+{
+    sh /root/m3-client.sh check
+    gw=$(ip -4 route show default | awk 'NR==1 {print $3}')
+    if [ -n "$gw" ]; then ping -c 2 -W 2 "$gw"; else echo 'GAGAL: tidak ada gateway.'; fi
+    ping -c 2 -W 2 192.217.4.10
+    ping -c 2 -W 2 1.1.1.1
+} 2>&1 | tee /root/bukti-m3/03-client.txt
+```
+
+### Check untuk bukti SS - tengen
+
+```bash
+# CONSOLE: TENGEN
+grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK).*02:12:03:(02|03):00:01' \
+    /root/m3-dhcpd.log | tail -n 16 | tee /root/bukti-m3/03-relay-server.txt
+```
+
+**Harus terlihat:** Itadori mendapat `192.217.2.x/24`, Ino `192.217.3.x/24`; gateway masing-masing `.2.1` dan `.3.1`; server identifier `.4.10`; log tengen menunjukkan request via `192.217.2.1` dan `192.217.3.1`. Bukti protokol paket lengkap diambil pada nomor 8.
+
+**Catatan DNS:** Client memang menerima DNS `.1.2` dan `.1.3`. Layanan BIND pada kedua node baru diminta pada **nomor 11**, di luar cakupan panduan ini. Untuk nomor 1-10, uji internet dengan IP `1.1.1.1`; kegagalan resolve nama sebelum nomor 11 tidak membuktikan NAT gagal. Node Debian tetap memakai resolver NAT selama persiapan.
+
+## 4. Pool 1/Pool 2 Network 2 berdasarkan DHCP class MAC
+
+### Konfigurasi - tengen
+
+```bash
+# CONSOLE: TENGEN
+cat > /root/m3-04-pools.sh <<'M3_POOL_A'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Hanya untuk tengen.'; exit 1; }
+cat > /root/m3-class-a.conf <<'CLASS_A'
+class "divA-pool1" {
+    match if (substring(hardware, 1, 6) = 02:12:03:02:00:01)
+          or (substring(hardware, 1, 6) = 02:12:03:02:00:02);
+}
+class "divA-pool2" {
+    match if (substring(hardware, 1, 6) = 02:12:03:02:00:03)
+          or (substring(hardware, 1, 6) = 02:12:03:02:00:04);
+}
+CLASS_A
+cat > /root/m3-net2.conf <<'NET2_FINAL'
+subnet 192.217.2.0 netmask 255.255.255.0 {
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.2.1;
+    option broadcast-address 192.217.2.255;
+    pool {
+        allow members of "divA-pool1";
+        range 192.217.2.10 192.217.2.35;
+        default-lease-time 3600;
+        max-lease-time 7200;
+    }
+    pool {
+        allow members of "divA-pool2";
+        range 192.217.2.70 192.217.2.95;
+        default-lease-time 3600;
+        max-lease-time 7200;
+    }
+}
+NET2_FINAL
+bash /root/m3-dhcp-apply.sh
+M3_POOL_A
+chmod +x /root/m3-04-pools.sh
+bash /root/m3-04-pools.sh
+```
+
+**Lalu jalankan setup pada keempat console client sesuai baris.** Script client nomor 3 harus sudah disalin pada semuanya. Setup juga memaksa DHCP baru; Itadori tidak memakai lease tahap awal yang mungkin berada di pool lain.
+
+| Console | Command |
+|---|---|
+| itadori | `sh /root/m3-client.sh setup itadori` |
+| fushiguro | `sh /root/m3-client.sh setup fushiguro` |
+| zenin | `sh /root/m3-client.sh setup zenin` |
+| okkotsu | `sh /root/m3-client.sh setup okkotsu` |
+
+### Check untuk bukti SS - tengen
+
+```bash
+# CONSOLE: TENGEN
+{
+    hostname
+    dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+    cat /etc/dhcp/m3-class-a.conf
+    cat /etc/dhcp/m3-net2.conf
+    grep -E 'DHCPACK.*02:12:03:02:00:0[1-4]' /root/m3-dhcpd.log | tail -n 8
+} 2>&1 | tee /root/bukti-m3/04-pools-server.txt
+```
+
+### Check untuk bukti SS - keempat client Network 2
+
+```sh
+# CONSOLE: ITADORI, FUSHIGURO, ZENIN, OKKOTSU; SATU PER SATU
+sh /root/m3-client.sh check 2>&1 | tee /root/bukti-m3/04-client.txt
+```
+
+**Harus terlihat:** Itadori/Fushiguro hanya `.2.10-.2.35`, Zenin/Okkotsu hanya `.2.70-.2.95`, masing-masing dengan MAC yang benar. Tidak ada `range` `.2.36-.2.69`. Pemisahan dibuktikan oleh `allow members of` dan class berdasarkan MAC, bukan hanya membuat dua range bebas.
+
+## 5. Short lease, long lease, DNS, dan domain-search Network 3
+
+### Konfigurasi - tengen
+
+```bash
+# CONSOLE: TENGEN
+cat > /root/m3-05-lease.sh <<'M3_POOL_B'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Hanya untuk tengen.'; exit 1; }
+cat > /root/m3-class-b.conf <<'CLASS_B'
+class "divB-short" {
+    match if (substring(hardware, 1, 6) = 02:12:03:03:00:01)
+          or (substring(hardware, 1, 6) = 02:12:03:03:00:02);
+}
+class "divB-long" {
+    match if substring(hardware, 1, 6) = 02:12:03:03:00:03;
+}
+CLASS_B
+cat > /root/m3-net3.conf <<'NET3_FINAL'
+subnet 192.217.3.0 netmask 255.255.255.0 {
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.3.1;
+    option broadcast-address 192.217.3.255;
+    option domain-name-servers 192.217.1.2, 192.217.1.3;
+    option domain-name "k12.com";
+    option domain-search "k12.com";
+    pool {
+        allow members of "divB-short";
+        range 192.217.3.10 192.217.3.89;
+        min-lease-time 1800;
+        default-lease-time 1800;
+        max-lease-time 1800;
+    }
+    pool {
+        allow members of "divB-long";
+        range 192.217.3.100 192.217.3.199;
+        min-lease-time 43200;
+        default-lease-time 43200;
+        max-lease-time 43200;
+    }
+}
+NET3_FINAL
+bash /root/m3-dhcp-apply.sh
+M3_POOL_B
+chmod +x /root/m3-05-lease.sh
+bash /root/m3-05-lease.sh
+```
+
+`default-lease-time` dan `max-lease-time` diterapkan pada pool yang hanya menerima kelas yang sesuai. `min-lease-time` membuat durasinya tetap sesuai soal walaupun client meminta lease lebih pendek. `dhcp-cache-threshold 0` pada konfigurasi utama menghindari ACK yang mengurangi durasi sisa lease saat permintaan diulang cepat.
+
+**Lalu jalankan pada tiga client berikut.**
+
+| Console | Command |
+|---|---|
+| ino | `sh /root/m3-client.sh setup ino` |
+| kusakabe | `sh /root/m3-client.sh setup kusakabe` |
+| miwa | `sh /root/m3-client.sh setup miwa` |
+
+### Check untuk bukti SS - tengen
+
+```bash
+# CONSOLE: TENGEN
+{
+    hostname
+    dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+    cat /etc/dhcp/m3-class-b.conf
+    cat /etc/dhcp/m3-net3.conf
+    grep -E 'DHCPACK.*02:12:03:03:00:0[1-3]' /root/m3-dhcpd.log | tail -n 8
+} 2>&1 | tee /root/bukti-m3/05-lease-server.txt
+```
+
+### Check untuk bukti SS - Ino, Kusakabe, Miwa
+
+```sh
+# CONSOLE: INO, KUSAKABE, MIWA; SATU PER SATU
+sh /root/m3-client.sh check 2>&1 | tee /root/bukti-m3/05-client.txt
+```
+
+**Harus terlihat:** Ino/Kusakabe `.3.10-.3.89` dengan `lease=1800`, Miwa `.3.100-.3.199` dengan `lease=43200`, `dns=192.217.1.2 192.217.1.3`, dan `search=k12.com`. `/etc/resolv.conf` menunjukkan `search k12.com` serta dua nameserver tersebut. Durasi nyata diperoleh dari ACK dan field `lease` di hook, bukan dari perkiraan waktu ping.
+
+## 6. Static DHCP lease Kugisaki 192.217.3.99
+
+### Konfigurasi - tengen
+
+```bash
+# CONSOLE: TENGEN
+cat > /root/m3-06-fixed.sh <<'M3_FIXED'
+#!/bin/bash
+set -euo pipefail
+[[ $(cat /root/m3-role) == tengen ]] || { echo 'Hanya untuk tengen.'; exit 1; }
+cat > /root/m3-fixed.conf <<'FIXED_HOST'
+host kugisaki {
+    hardware ethernet 02:12:03:03:00:04;
+    fixed-address 192.217.3.99;
+    option subnet-mask 255.255.255.0;
+    option routers 192.217.3.1;
+    option broadcast-address 192.217.3.255;
+    option domain-name-servers 192.217.1.2, 192.217.1.3;
+    option domain-name "k12.com";
+    option domain-search "k12.com";
+    default-lease-time 3600;
+    max-lease-time 7200;
+}
+FIXED_HOST
+bash /root/m3-dhcp-apply.sh
+M3_FIXED
+chmod +x /root/m3-06-fixed.sh
+bash /root/m3-06-fixed.sh
+```
+
+### Konfigurasi/renew - Kugisaki
+
+```sh
+# CONSOLE: KUGISAKI
+sh /root/m3-client.sh setup kugisaki
+sh /root/m3-client.sh renew
+```
+
+### Check untuk bukti SS - Kugisaki
+
+```sh
+# CONSOLE: KUGISAKI
+{
+    sh /root/m3-client.sh check
+    ping -c 3 -W 2 192.217.3.1
+    ping -c 2 -W 2 192.217.4.10
+} 2>&1 | tee /root/bukti-m3/06-kugisaki.txt
+```
+
+### Check untuk bukti SS - tengen
+
+```bash
+# CONSOLE: TENGEN
+{
+    hostname
+    dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+    cat /etc/dhcp/m3-fixed.conf
+    grep 'range ' /etc/dhcp/m3-net3.conf
+    grep -E 'DHCP(ACK|OFFER).*02:12:03:03:00:04' /root/m3-dhcpd.log | tail -n 8
+} 2>&1 | tee /root/bukti-m3/06-reservasi-server.txt
+```
+
+**Harus terlihat:** MAC Kugisaki sesuai reservasi; IP `.3.99/24` tetap sama pada kedua permintaan, gateway `.3.1`, dan DHCPACK/DHCPOFFER untuk `.3.99` dari server. IP ini berasal dari DHCP, bukan konfigurasi IP manual.
+
+**Penting untuk membaca bukti:** `fixed-address` ISC DHCP umumnya tidak menjadi entri lease dinamis di `dhcpd.leases`. Karena itu bukti Kugisaki menggunakan deklarasi `host`, MAC, log ACK, dan konfigurasi client. Tidak ditemukannya `.3.99` dalam file lease bukan tanda reservasi gagal.
+
+## 7. Audit seluruh client, routing, options, dan lease tanpa bentrok
+
+### Konfigurasi pemeriksaan - semua delapan client
+
+Blok ini membuat pemeriksa kebijakan final. **Salin pada semua delapan client**, satu per satu. Jalankan setelah nomor 4-6 selesai.
+
+```sh
+# CONSOLE: SETIAP CLIENT ALPINE
+cat > /root/m3-client-check.sh <<'M3_CLIENT_CHECK'
+#!/bin/sh
+set -eu
+role=$(cat /root/m3-role)
+sh /root/m3-client.sh check
+[ -s /root/m3-lastlease.txt ] || { echo 'FAIL: belum memperoleh DHCPACK.'; exit 1; }
+value() { sed -n "s/^$1=//p" /root/m3-lastlease.txt; }
+ip=$(value ip)
+octet=${ip##*.}
+mac=$(cat /sys/class/net/eth0/address)
+case "$role" in
+    itadori) net=2; lo=10; hi=35; expected_mac=02:12:03:02:00:01; expected_lease=3600 ;;
+    fushiguro) net=2; lo=10; hi=35; expected_mac=02:12:03:02:00:02; expected_lease=3600 ;;
+    zenin) net=2; lo=70; hi=95; expected_mac=02:12:03:02:00:03; expected_lease=3600 ;;
+    okkotsu) net=2; lo=70; hi=95; expected_mac=02:12:03:02:00:04; expected_lease=3600 ;;
+    ino) net=3; lo=10; hi=89; expected_mac=02:12:03:03:00:01; expected_lease=1800 ;;
+    kusakabe) net=3; lo=10; hi=89; expected_mac=02:12:03:03:00:02; expected_lease=1800 ;;
+    miwa) net=3; lo=100; hi=199; expected_mac=02:12:03:03:00:03; expected_lease=43200 ;;
+    kugisaki) net=3; lo=99; hi=99; expected_mac=02:12:03:03:00:04; expected_lease=3600 ;;
+    *) echo 'FAIL: client tidak dikenal.'; exit 1 ;;
+esac
+fail=0
+assert_eq() {
+    if [ "$2" = "$3" ]; then printf 'PASS %s: %s\n' "$1" "$2";
+    else printf 'FAIL %s: %s (harus %s)\n' "$1" "$2" "$3"; fail=1; fi
+}
+assert_eq MAC "$mac" "$expected_mac"
+assert_eq subnet_IP "${ip%.*}" "192.217.$net"
+if [ "$octet" -ge "$lo" ] && [ "$octet" -le "$hi" ]; then
+    echo "PASS pool: $ip"
+else
+    echo "FAIL pool: $ip bukan 192.217.$net.$lo-$hi"; fail=1
+fi
+assert_eq mask "$(value subnet)" 255.255.255.0
+assert_eq broadcast "$(value broadcast)" "192.217.$net.255"
+assert_eq gateway_ACK "$(value router)" "192.217.$net.1"
+assert_eq DNS "$(value dns)" '192.217.1.2 192.217.1.3'
+assert_eq domain_search "$(value search)" k12.com
+assert_eq server_identifier "$(value serverid)" 192.217.4.10
+assert_eq lease_detik "$(value lease)" "$expected_lease"
+current=$(ip -4 addr show dev eth0 | awk '/inet / {print $2}')
+assert_eq IP_aktif "$current" "$ip/24"
+gw=$(ip -4 route show default | awk 'NR==1 {print $3}')
+assert_eq gateway_aktif "$gw" "192.217.$net.1"
+assert_eq resolver_search "$(sed -n 's/^search //p' /etc/resolv.conf)" k12.com
+nameservers=$(awk '/^nameserver / {if (n++) printf " "; printf "%s", $2}' /etc/resolv.conf)
+assert_eq resolver_DNS "$nameservers" '192.217.1.2 192.217.1.3'
+if ping -c 2 -W 2 "192.217.$net.1"; then echo 'PASS ping gateway'; else fail=1; fi
+if ping -c 2 -W 2 192.217.4.10; then echo 'PASS ping tengen'; else fail=1; fi
+if ping -c 2 -W 2 1.1.1.1; then echo 'PASS akses eksternal'; else fail=1; fi
+[ "$fail" = 0 ] || { echo "HASIL: FAIL $role"; exit 1; }
+echo "HASIL: PASS $role"
+M3_CLIENT_CHECK
+chmod +x /root/m3-client-check.sh
+```
+
+### Konfigurasi pemeriksaan lease - tengen
+
+Pemeriksa berikut membaca **catatan terbaru setiap IP**, karena file lease dapat memuat banyak catatan historis. Hanya binding aktif yang belum kedaluwarsa dihitung.
+
+```bash
+# CONSOLE: TENGEN
+cat > /root/m3-audit-leases.py <<'M3_LEASE_AUDIT'
+#!/usr/bin/env python3
+import datetime as dt
+import ipaddress
+import re
+from pathlib import Path
+
+expected = {
+    '02:12:03:02:00:01': ('itadori', 2, 10, 35, 3600),
+    '02:12:03:02:00:02': ('fushiguro', 2, 10, 35, 3600),
+    '02:12:03:02:00:03': ('zenin', 2, 70, 95, 3600),
+    '02:12:03:02:00:04': ('okkotsu', 2, 70, 95, 3600),
+    '02:12:03:03:00:01': ('ino', 3, 10, 89, 1800),
+    '02:12:03:03:00:02': ('kusakabe', 3, 10, 89, 1800),
+    '02:12:03:03:00:03': ('miwa', 3, 100, 199, 43200),
+}
+text = Path('/var/lib/dhcp/dhcpd.leases').read_text()
+latest = {}
+for ip, block in re.findall(r'lease\s+([0-9.]+)\s*\{(.*?)\}', text, re.S):
+    latest[ip] = block
+
+def field(block, pattern):
+    m = re.search(pattern, block)
+    return m.group(1) if m else ''
+
+def timestamp(block, name):
+    value = field(block, rf'\b{name}\s+\d\s+(\d{{4}}/\d{{2}}/\d{{2}}\s+\d{{2}}:\d{{2}}:\d{{2}});')
+    return dt.datetime.strptime(value, '%Y/%m/%d %H:%M:%S').replace(tzinfo=dt.timezone.utc) if value else None
+
+now = dt.datetime.now(dt.timezone.utc)
+seen = {}
+errors = []
+print('AUDIT LEASE AKTIF TERBARU -', now.isoformat())
+print(f'{"CLIENT":12} {"IP":17} {"MAC":18} {"DURASI":8} HASIL')
+for ip, block in sorted(latest.items(), key=lambda item: ipaddress.ip_address(item[0])):
+    if field(block, r'\bbinding state\s+(\w+);') != 'active':
+        continue
+    end = timestamp(block, 'ends')
+    if end and end <= now:
+        continue
+    mac = field(block, r'hardware ethernet\s+([0-9a-fA-F:]+);').lower()
+    data = expected.get(mac)
+    if data is None:
+        errors.append(f'Lease aktif tidak dikenal: {ip}, MAC {mac}')
+        print(f'{"UNKNOWN":12} {ip:17} {mac:18} {"-":8} FAIL')
+        continue
+    name, net, low, high, duration = data
+    parts = ip.split('.')
+    good_ip = parts[:3] == ['192', '217', str(net)] and low <= int(parts[3]) <= high
+    start = timestamp(block, 'starts')
+    actual = int((end - start).total_seconds()) if start and end else None
+    good_duration = actual == duration
+    if not good_ip:
+        errors.append(f'{name}: {ip} di luar pool')
+    if not good_duration:
+        errors.append(f'{name}: durasi {actual}, seharusnya {duration}')
+    duplicate = mac in seen
+    if duplicate:
+        errors.append(f'{name}: lebih dari satu binding aktif: {seen[mac]} dan {ip}')
+    seen[mac] = ip
+    flag = 'PASS' if good_ip and good_duration and not duplicate else 'FAIL'
+    print(f'{name:12} {ip:17} {mac:18} {str(actual):8} {flag}')
+for mac, data in expected.items():
+    if mac not in seen:
+        errors.append(f'{data[0]}: tidak ditemukan lease aktif; renew client')
+print('Kugisaki: fixed-address 192.217.3.99; verifikasi deklarasi host, ACK, dan client.')
+print('File lease dinamis tidak dipakai untuk membuktikan reservasi fixed-address.')
+if errors:
+    for error in errors:
+        print('FAIL:', error)
+    raise SystemExit(1)
+print('PASS: 7 client dinamis, pool dan durasi sesuai; tidak ada binding aktif ganda.')
+M3_LEASE_AUDIT
+chmod +x /root/m3-audit-leases.py
+```
+
+### Check untuk bukti SS - semua delapan client
+
+```sh
+# CONSOLE: ITADORI, FUSHIGURO, ZENIN, OKKOTSU, INO, KUSAKABE,
+# MIWA, KUGISAKI; SATU PER SATU
+# Renew memberi ACK baru untuk audit durasi, tidak menggunakan data lease lama.
+sh /root/m3-client.sh renew
+sh /root/m3-client-check.sh 2>&1 | tee /root/bukti-m3/07-audit-client.txt
+```
+
+### Check untuk bukti SS - tengen, setelah seluruh client diperiksa
+
+```bash
+# CONSOLE: TENGEN
+{
+    date -Is
+    hostname
+    ls -l /var/lib/dhcp/dhcpd.leases
+    python3 /root/m3-audit-leases.py
+    echo 'RESERVASI KUGISAKI:'
+    cat /etc/dhcp/m3-fixed.conf
+    echo 'ACK KUGISAKI:'
+    grep -E 'DHCPACK.*02:12:03:03:00:04' /root/m3-dhcpd.log | tail -n 2
+} 2>&1 | tee /root/bukti-m3/07-audit-server.txt
+```
+
+**Harus terlihat:** `HASIL: PASS` pada masing-masing client; tujuh client dinamis pada audit server memiliki IP dan durasi benar; tidak ada binding aktif ganda; Kugisaki `.3.99` dengan bukti ACK. Jangan menyebut log historis sebagai bentrok lease aktif. Jika pemeriksa menulis FAIL, selesaikan penyebabnya sebelum memasukkan screenshot sebagai bukti berhasil.
+
+## 8. Packet capture DHCP DORA dan giaddr
+
+### Konfigurasi capture - tengen
+
+Buka console **tengen dan ino bersamaan**. Jalankan capture dahulu di tengen, lalu minta lease baru di Ino. Ino dipilih untuk membuktikan giaddr Network 3 dan short lease 1800 detik.
+
+```bash
+# CONSOLE: TENGEN - MULAI CAPTURE, LALU PINDAH KE INO
+bash <<'M3_CAPTURE_START'
+set -euo pipefail
+mkdir -p /root/bukti-m3
+if [[ -f /run/m3-capture.pid ]] && kill -0 "$(cat /run/m3-capture.pid)" 2>/dev/null; then
+    echo 'Capture sebelumnya masih aktif. Hentikan dahulu.'; exit 1
+fi
+tcpdump -ni eth0 -s 0 -U -w /root/bukti-m3/08-dora.pcap \
+    'udp and (port 67 or port 68)' > /root/bukti-m3/08-capture.log 2>&1 &
+printf '%s\n' "$!" > /run/m3-capture.pid
+sleep 1
+kill -0 "$(cat /run/m3-capture.pid)"
+echo 'CAPTURE AKTIF. Sekarang jalankan renew pada console Ino.'
+M3_CAPTURE_START
+```
+
+```sh
+# CONSOLE: INO - SAAT CAPTURE TENGEN AKTIF
+sh /root/m3-client.sh renew
+sh /root/m3-client.sh check 2>&1 | tee /root/bukti-m3/08-client.txt
+```
+
+### Check untuk bukti SS - tengen
+
+Setelah Ino mendapat ACK, kembali ke tengen untuk menghentikan dan membaca capture.
+
+```bash
+# CONSOLE: TENGEN
+bash <<'M3_CAPTURE_STOP'
+set -euo pipefail
+pid=$(cat /run/m3-capture.pid)
+kill -INT "$pid"
+for ((i=0; i<30; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+done
+rm -f /run/m3-capture.pid
+echo 'DETAIL PAKET DHCP:'
+tcpdump -nn -vvv -r /root/bukti-m3/08-dora.pcap 2>&1 \
+    | tee /root/bukti-m3/08-dora.txt
+M3_CAPTURE_STOP
+```
+
+**Ambil SS output decoding tcpdump** yang menunjukkan Discover, Offer, Request, dan ACK. Jika layar tidak cukup, ambil beberapa SS dengan transaction ID (`xid`) dan MAC Ino yang sama. File `.pcap` juga tersedia pada tengen untuk pemeriksaan Wireshark.
+
+| Field pada hasil tcpdump | Nilai/arti yang harus ditunjukkan |
+|---|---|
+| DHCP-Message Option 53 | Discover -> Offer -> Request -> ACK |
+| `Client-Ethernet-Address` | MAC Ino `02:12:03:03:00:01` |
+| `xid` | Sama untuk transaksi DORA yang diperiksa |
+| `Server-ID Option 54` | `192.217.4.10` |
+| `Your-IP` / `yiaddr` | IP Ino dalam `.3.10-.3.89`, pada Offer/ACK |
+| `Lease-Time Option 51` | `1800` detik pada Offer/ACK |
+| `Gateway-IP` / `giaddr` | `192.217.3.1`, interface eth3 jichi |
+| `Default-Gateway Option 3` | `192.217.3.1`, default gateway client |
+| `Domain-Name-Server Option 6` | `192.217.1.2`, `192.217.1.3` |
+| `Domain-Search Option 119` | `k12.com` |
+
+**Giaddr bukan IP tengen** dan bukan selalu IP sumber paket IP. Giaddr berada di header BOOTP/DHCP; tcpdump biasanya melabelinya `Gateway-IP`. Jika pengujian diulang memakai Itadori, giaddr harus **192.217.2.1**. Untuk capture di tengen, jangan menyaring `ether host MAC_CLIENT`: frame Ethernet pada segmen server berasal dari relay, sementara MAC client berada di payload DHCP.
+
+## 9. Gangguan DHCP Relay dan pemulihan lease baru
+
+### Simulasi gangguan - jichi
+
+```bash
+# CONSOLE: JICHI - HENTIKAN RELAY, SERVER TENGEN TETAP HIDUP
+{
+    date -Is
+    hostname
+    bash /root/m3-relay-control.sh stop
+    if pgrep -a -x dhcrelay; then echo 'GAGAL: relay masih aktif';
+    else echo 'BUKTI: proses dhcrelay tidak ada'; fi
+} 2>&1 | tee /root/bukti-m3/09-relay-mati.txt
+```
+
+### Check untuk bukti SS gangguan - Itadori
+
+Script renew menghentikan daemon lama, melepas IP, dan memulai DISCOVER baru. **Ini penting:** renew unicast dari lease lama dapat langsung menuju server tanpa relay, sehingga kurang tepat untuk membuktikan gangguan relay.
+
+```sh
+# CONSOLE: ITADORI - SAAT RELAY MASIH MATI
+{
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+    hostname
+    if sh /root/m3-client.sh renew; then
+        echo 'HASIL TIDAK SESUAI: masih mendapat DHCP; periksa relay/server lain.'
+    else
+        echo 'HASIL SESUAI: DHCP baru gagal ketika relay dihentikan.'
+    fi
+    ip -4 addr show dev eth0
+    ip -4 route
+    cat /root/m3-udhcpc.log
+} 2>&1 | tee /root/bukti-m3/09-gangguan-client.txt
+```
+
+**Harus terlihat:** Discover dikirim berulang, tidak memperoleh lease/Offer, dan tidak ada IP IPv4 global serta default gateway hasil DHCP pada eth0. Gejala ini berlaku pada client yang dipaksa meminta lease baru; client lain dengan lease lama tidak harus langsung kehilangan konektivitas.
+
+### Pemulihan - jichi
+
+```bash
+# CONSOLE: JICHI
+{
+    date -Is
+    bash /root/m3-relay-control.sh start
+    bash /root/m3-relay-control.sh status
+} 2>&1 | tee /root/bukti-m3/09-relay-pulih.txt
+```
+
+### Check untuk bukti SS pemulihan - Itadori
+
+```sh
+# CONSOLE: ITADORI - SETELAH RELAY AKTIF LAGI
+sh /root/m3-client.sh renew
+sh /root/m3-client-check.sh 2>&1 | tee /root/bukti-m3/09-pemulihan-client.txt
+```
+
+### Check untuk bukti SS pemulihan - tengen
+
+```bash
+# CONSOLE: TENGEN
+{
+    date -Is
+    bash /root/m3-dhcp-control.sh status
+    grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK).*02:12:03:02:00:01' \
+        /root/m3-dhcpd.log | tail -n 8
+} 2>&1 | tee /root/bukti-m3/09-pemulihan-server.txt
+```
+
+**Harus terlihat:** Itadori kembali mendapat IP **Pool 1** `.2.10-.2.35`, gateway tetap `.2.1`, options benar, dan ping berhasil. IP boleh berbeda dari IP sebelum gangguan, selama berada di pool yang benar. Dibandingkan dengan SS gangguan, SS pemulihan memperlihatkan server dan relay aktif serta DHCP kembali berhasil.
+
+## 10. Autostart DHCP server/relay dan verifikasi setelah restart node
+
+### Konfigurasi autostart - jichi dan tengen
+
+Pada node Docker GNS3, gunakan **Start command** agar script benar-benar dijalankan setiap node start. Konfigurasi `systemctl enable` saja tidak memastikan autostart jika container tidak menjalankan systemd.
+
+**Sebelum Stop/Start, pastikan `/root` persisten.** Pada pengaturan node/template Docker, pastikan volume/persistent directory `/root` tersedia. Jika perlu menambahkan volume, lakukan sebelum konfigurasi awal atau pindahkan dahulu isi `/root` melalui mekanisme GNS3; menambahkan mount baru dapat menutupi data lama. Paket pada layer container bisa hilang setelah Stop/Start, sehingga blok berikut juga membuat cache paket beserta dependensi.
+
+**Salin dan jalankan blok ini di jichi, lalu di tengen**, sesudah konfigurasi final nomor 4-6 dan pemulihan nomor 9 selesai.
+
+```bash
+# CONSOLE: JICHI, LALU ULANGI DI TENGEN
+cat > /root/m3-10-autostart.sh <<'M3_AUTOSTART'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+role=$(cat /root/m3-role)
+state=/root/modul3-state
+case "$role" in
+    jichi) packages=(iproute2 iputils-ping procps iptables udhcpc ifupdown isc-dhcp-relay tcpdump) ;;
+    tengen) packages=(iproute2 iputils-ping procps isc-dhcp-server tcpdump python3) ;;
+    *) echo 'Autostart nomor 10 hanya untuk jichi/tengen.'; exit 1 ;;
+esac
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 install -y "${packages[@]}"
+
+# Unduh dependensi yang telah terpasang juga, bukan hanya paket utama.
+mkdir -p "$state/boot-debs.new/partial"
+apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
+    --no-breaks --no-replaces --no-enhances "${packages[@]}" \
+    | awk '/^[a-zA-Z0-9][a-zA-Z0-9.+:-]*$/ {print $1}' \
+    | sort -u > "$state/dependency-candidates.txt"
+dependencies=()
+while IFS= read -r package; do
+    if [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) == 'install ok installed' ]]; then
+        dependencies+=("$package")
+    fi
+done < "$state/dependency-candidates.txt"
+(( ${#dependencies[@]} > 0 )) || { echo 'Daftar dependensi kosong.'; exit 1; }
+apt-get -o Acquire::Retries=3 -o Dir::Cache::archives="$state/boot-debs.new" \
+    --download-only --reinstall --no-install-recommends install -y "${dependencies[@]}"
+if [[ -d "$state/boot-debs" ]]; then
+    mv "$state/boot-debs" "$state/boot-debs.backup.$(date +%s)"
+fi
+mv "$state/boot-debs.new" "$state/boot-debs"
+printf '%s\n' "${packages[@]}" | sort -u > "$state/boot-packages.txt"
+
+cat > /root/m3-boot.sh <<'M3_BOOT'
+#!/bin/bash
+set -euo pipefail
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+exec >> /root/m3-boot.log 2>&1
+echo "=== BOOT MULAI $(date -Is) ==="
+role=$(cat /root/m3-role)
+state=/root/modul3-state
+need_packages=0
+while IFS= read -r package; do
+    [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) == 'install ok installed' ]] || need_packages=1
+done < "$state/boot-packages.txt"
+if (( need_packages )); then
+    shopt -s nullglob
+    debs=("$state"/boot-debs/*.deb)
+    (( ${#debs[@]} > 0 )) || { echo 'Cache .deb tidak ditemukan.'; exit 1; }
+    apt-get --no-download --no-install-recommends -y \
+        -o Dpkg::Options::=--force-confold install "${debs[@]}"
+fi
+bash /root/m3-network.sh "$role" runtime
+case "$role" in
+    jichi)
+        cat > /etc/default/isc-dhcp-relay <<'RELAY_BOOT_DEFAULT'
+SERVERS="192.217.4.10"
+INTERFACES=""
+OPTIONS="-4 -id eth2 -id eth3 -iu eth4"
+RELAY_BOOT_DEFAULT
+        for iface in eth2 eth3 eth4; do
+            iptables -C INPUT -i "$iface" -p udp --dport 67 -j ACCEPT 2>/dev/null || \
+                iptables -I INPUT 1 -i "$iface" -p udp --dport 67 -j ACCEPT
+        done
+        bash /root/m3-relay-control.sh restart
+        ;;
+    tengen)
+        cat > /etc/default/isc-dhcp-server <<'SERVER_BOOT_DEFAULT'
+INTERFACESv4="eth0"
+INTERFACESv6=""
+SERVER_BOOT_DEFAULT
+        bash /root/m3-dhcp-apply.sh
+        ;;
+    *) echo 'Peran boot tidak dikenal.'; exit 1 ;;
+esac
+echo "BOOT OK: $role $(date -Is)"
+M3_BOOT
+chmod +x /root/m3-boot.sh
+if [[ "$role" == jichi ]]; then
+    bash /root/m3-relay-control.sh status
+else
+    bash /root/m3-dhcp-control.sh status
+fi
+echo 'Script dan cache autostart siap. Atur Start command GNS3, lalu Stop/Start untuk bukti.'
+M3_AUTOSTART
+chmod +x /root/m3-10-autostart.sh
+bash /root/m3-10-autostart.sh
+```
+
+**Atur Start command GNS3 pada kedua node, jichi dan tengen, menjadi persis berikut.** Ini diisi di pengaturan GNS3, **bukan dicopas sebagai command console**.
+
+```text
+/bin/bash -c '/bin/bash /root/m3-boot.sh || tail -n 60 /root/m3-boot.log; exec /bin/bash'
+```
+
+### Check sebelum restart - jichi dan tengen
+
+```bash
+# CONSOLE: JICHI, LALU ULANGI DI TENGEN, SEBELUM RESTART
+{
+    date -Is
+    hostname
+    cat /root/m3-role
+    ls -l /root/m3-boot.sh /root/m3-network.sh
+    echo 'JUMLAH PAKET CACHE:'
+    find /root/modul3-state/boot-debs -maxdepth 1 -name '*.deb' | wc -l
+    cat /root/modul3-state/boot-packages.txt
+} 2>&1 | tee /root/bukti-m3/10-sebelum-restart.txt
+```
+
+**Lakukan Stop lalu Start melalui GNS3 pada kedua node.** Start jichi dahulu, lalu tengen. Tunggu sampai muncul `BOOT OK` di log. Client boleh tetap menyala. Sesudah Start, **jangan menjalankan script server/relay start secara manual** sebelum mengambil bukti: tujuannya membuktikan autostart.
+
+### Check untuk bukti SS setelah restart - jichi
+
+```bash
+# CONSOLE: JICHI, SETELAH STOP/START
+{
+    date -Is
+    hostname
+    tail -n 30 /root/m3-boot.log
+    ip -br -4 addr
+    ip -4 route
+    sysctl net.ipv4.ip_forward
+    iptables -t nat -S POSTROUTING
+    bash /root/m3-relay-control.sh status
+    ping -c 3 -W 2 192.217.4.10
+    ping -c 3 -W 2 1.1.1.1
+} 2>&1 | tee /root/bukti-m3/10-jichi-setelah-restart.txt
+```
+
+### Check untuk bukti SS setelah restart - tengen
+
+```bash
+# CONSOLE: TENGEN, SETELAH STOP/START
+{
+    date -Is
+    hostname
+    tail -n 30 /root/m3-boot.log
+    ip -br -4 addr
+    ip -4 route
+    dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+    bash /root/m3-dhcp-control.sh status
+    cat /etc/dhcp/m3-net2.conf /etc/dhcp/m3-net3.conf /etc/dhcp/m3-fixed.conf
+    ls -l /var/lib/dhcp/dhcpd.leases
+    ping -c 3 -W 2 192.217.4.1
+    ping -c 2 -W 2 1.1.1.1
+} 2>&1 | tee /root/bukti-m3/10-tengen-setelah-restart.txt
+```
+
+### Check untuk bukti SS setelah restart - seluruh client
+
+Lease lama saja belum membuktikan server hasil autostart dapat membagikan alamat. Karena itu paksa **lease baru** dari semua delapan client, lalu cek kebijakan final.
+
+```sh
+# CONSOLE: ITADORI, FUSHIGURO, ZENIN, OKKOTSU, INO, KUSAKABE,
+# MIWA, KUGISAKI; SATU PER SATU, SETELAH SERVER/RELAY RESTART
+sh /root/m3-client.sh renew
+sh /root/m3-client-check.sh 2>&1 | tee /root/bukti-m3/10-client-setelah-restart.txt
+```
+
+### Check audit akhir - tengen
+
+```bash
+# CONSOLE: TENGEN, SETELAH SEMUA CLIENT RENEW
+{
+    date -Is
+    python3 /root/m3-audit-leases.py
+    echo 'ACK KUGISAKI SETELAH RESTART:'
+    grep -E 'DHCPACK.*02:12:03:03:00:04' /root/m3-dhcpd.log | tail -n 2
+} 2>&1 | tee /root/bukti-m3/10-audit-akhir.txt
+```
+
+**Harus terlihat:** `BOOT OK` bertanggal sesudah restart, proses server/relay aktif, alamat dan gateway jichi/tengen benar, NAT aktif, seluruh client kembali memperoleh DHCP, tujuh client dinamis lulus audit, Ino/Kusakabe 1800 detik, Miwa 43200 detik, dan Kugisaki tetap `.3.99`. Ping gateway, tengen, dan eksternal berhasil dari client.
+
+Jika nanti mengubah DHCP, ubah file sumber `/root/m3-*.conf` dan jalankan `/root/m3-dhcp-apply.sh`; boot membaca sumber yang sama. Mengedit hanya file hasil salinan `/etc/dhcp/` akan tertimpa sumber `/root` pada startup berikutnya.
+
+## Daftar screenshot untuk laporan
+
+| Soal | Console untuk SS | Bukti utama |
+|---|---|---|
+| 1 | jichi + seluruh host infrastruktur | IP, route, forwarding, NAT, ping gateway/eksternal |
+| 2 | tengen | Validasi exit 0, subnet lokal tanpa pool, proses dan UDP 67 aktif |
+| 3 | jichi, itadori, ino, tengen | Relay eth2/eth3 -> eth4, lease dua subnet dan log via dua gateway |
+| 4 | tengen + empat client Network 2 | Class MAC, pembatasan pool, IP masing-masing sesuai kelompok |
+| 5 | tengen, ino, kusakabe, miwa | Short 1800, long 43200, DNS dan search domain |
+| 6 | tengen, kugisaki | Reservasi MAC, ACK .3.99, dua permintaan menghasilkan IP tetap |
+| 7 | tengen + delapan client | Mask, broadcast, route, DNS/search, audit binding aktif tanpa bentrok |
+| 8 | tengen + ino | DORA/xid, server ID, yiaddr, lease time, giaddr .3.1 |
+| 9 | jichi, itadori, tengen | Relay mati -> DHCP baru gagal; relay hidup -> Pool 1 dan gateway pulih |
+| 10 | jichi, tengen + delapan client | BOOT OK baru, daemon aktif otomatis, DHCP baru dan seluruh kebijakan tetap |
+
+Output teks disimpan pada `/root/bukti-m3` di node masing-masing. Screenshot harus diambil dari console GNS3 setelah command dijalankan; file teks maupun contoh nilai target bukan pengganti bukti pelaksanaan.
+
+## Jika ada error
+
+| Gejala | Pemeriksaan/tindakan |
+|---|---|
+| `eth4 does not exist` pada jichi | Tambah adapter sampai eth0-eth4 dan cocokkan kabel topologi. |
+| `No subnet declaration for eth0` pada tengen | Pastikan eth0 `192.217.4.10/24` dan blok subnet `.4.0/24` ada. |
+| Client terus Discover | Periksa status dhcpd/dhcrelay, link, MAC eth0, class yang cocok, dan log tengen. |
+| Ino/Kusakabe mendapat long pool | Pastikan nomor 5 telah diterapkan, MAC benar, lalu `sh /root/m3-client.sh renew`. |
+| Kugisaki tidak mendapat `.3.99` | Cocokkan MAC client dengan host declaration; terapkan nomor 6 dan renew. |
+| Search domain kosong | Pastikan Alpine/BusyBox mendukung option 119, permintaan memakai `-O 119`, dan cek Option 119 lewat capture nomor 8. Jangan menandai audit PASS dengan mengisi search manual. |
+| Ping IP berhasil, nama domain gagal sebelum nomor 11 | DNS BIND belum dikonfigurasi. Lanjutkan nomor 11; untuk cakupan ini gunakan IP saat menguji internet. |
+| Paket/service hilang setelah Stop/Start | Periksa volume `/root`, Start command, cache paket, dan `/root/m3-boot.log`. |
+| Audit durasi/lease FAIL | Renew seluruh client sesudah class final aktif, lalu baca catatan terakhir per IP melalui pemeriksa, bukan semua riwayat sebagai lease aktif. |
+
+## Acuan teknis dan batas verifikasi
+
+- ISC: [dhcpd.conf](https://kb.isc.org/docs/isc-dhcp-44-manual-pages-dhcpdconf), [dhcpd.leases](https://kb.isc.org/docs/isc-dhcp-44-manual-pages-dhcpdleases).
+- Debian: [dhcrelay dan opsi upstream/downstream](https://manpages.debian.org/trixie/isc-dhcp-relay/dhcrelay.8.en.html).
+- Alpine: [udhcpc dan permintaan domain-search](https://wiki.alpinelinux.org/wiki/Udhcpc).
+- GNS3: [Docker, persistence, dan startup](https://docs.gns3.com/docs/emulators/docker-support-in-gns3).
 ## Persiapan sebelum Soal 11
 
 Soal 11–20 bergantung pada hasil soal 1–10 (NAT di jichi, DHCP relay, DHCP server, dan IP client). Jika GNS3 sempat ter-close atau node di-restart, paket dan konfigurasi di `/etc` hilang, sedangkan isi `/root` tetap. Jalankan pemulihan berikut lebih dulu.
