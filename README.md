@@ -1,4 +1,4 @@
-# Modul 3 K12 - Konfigurasi Soal 1-10
+# Modul 3 K12
 
 **Prefix: `192.217` | Kelompok: `K12` | Domain-search: `k12.com` | Mask: `/24`.**
 
@@ -1418,28 +1418,6 @@ Jika nanti mengubah DHCP, ubah file sumber `/root/m3-*.conf` dan jalankan `/root
 | 10 | jichi, tengen + delapan client | BOOT OK baru, daemon aktif otomatis, DHCP baru dan seluruh kebijakan tetap |
 
 Output teks disimpan pada `/root/bukti-m3` di node masing-masing. Screenshot harus diambil dari console GNS3 setelah command dijalankan; file teks maupun contoh nilai target bukan pengganti bukti pelaksanaan.
-
-## Jika ada error
-
-| Gejala | Pemeriksaan/tindakan |
-|---|---|
-| `eth4 does not exist` pada jichi | Tambah adapter sampai eth0-eth4 dan cocokkan kabel topologi. |
-| `No subnet declaration for eth0` pada tengen | Pastikan eth0 `192.217.4.10/24` dan blok subnet `.4.0/24` ada. |
-| Client terus Discover | Periksa status dhcpd/dhcrelay, link, MAC eth0, class yang cocok, dan log tengen. |
-| Ino/Kusakabe mendapat long pool | Pastikan nomor 5 telah diterapkan, MAC benar, lalu `sh /root/m3-client.sh renew`. |
-| Kugisaki tidak mendapat `.3.99` | Cocokkan MAC client dengan host declaration; terapkan nomor 6 dan renew. |
-| Search domain kosong | Pastikan Alpine/BusyBox mendukung option 119, permintaan memakai `-O 119`, dan cek Option 119 lewat capture nomor 8. Jangan menandai audit PASS dengan mengisi search manual. |
-| Ping IP berhasil, nama domain gagal sebelum nomor 11 | DNS BIND belum dikonfigurasi. Lanjutkan nomor 11; untuk cakupan ini gunakan IP saat menguji internet. |
-| Paket/service hilang setelah Stop/Start | Periksa volume `/root`, Start command, cache paket, dan `/root/m3-boot.log`. |
-| Audit durasi/lease FAIL | Renew seluruh client sesudah class final aktif, lalu baca catatan terakhir per IP melalui pemeriksa, bukan semua riwayat sebagai lease aktif. |
-
-## Acuan teknis dan batas verifikasi
-
-- ISC: [dhcpd.conf](https://kb.isc.org/docs/isc-dhcp-44-manual-pages-dhcpdconf), [dhcpd.leases](https://kb.isc.org/docs/isc-dhcp-44-manual-pages-dhcpdleases).
-- Debian: [dhcrelay dan opsi upstream/downstream](https://manpages.debian.org/trixie/isc-dhcp-relay/dhcrelay.8.en.html).
-- Alpine: [udhcpc dan permintaan domain-search](https://wiki.alpinelinux.org/wiki/Udhcpc).
-- GNS3: [Docker, persistence, dan startup](https://docs.gns3.com/docs/emulators/docker-support-in-gns3).
-## Persiapan sebelum Soal 11
 
 Soal 11–20 bergantung pada hasil soal 1–10 (NAT di jichi, DHCP relay, DHCP server, dan IP client). Jika GNS3 sempat ter-close atau node di-restart, paket dan konfigurasi di `/etc` hilang, sedangkan isi `/root` tetap. Jalankan pemulihan berikut lebih dulu.
 
