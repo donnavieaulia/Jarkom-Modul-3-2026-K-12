@@ -1,47 +1,12 @@
-# Modul 3 K12
+# Jarkom-Modul-3-2026-K-21
 
-**Prefix: `192.217` | Kelompok: `K12` | Domain-search: `k12.com` | Mask: `/24`.**
+| Nama                          | NRP        |
+| ----------------------------- | ---------- |
+| Donnavie Aulia                | 5027251093 |
+| Ndaru Satria Tama             | 5027251124 |
 
-## Pemetaan IP dan console
 
-| Node | Interface dan IP | Gateway | Peran |
-|---|---|---|---|
-| jichi | eth0: DHCP dari NAT | dari NAT | WAN |
-| jichi | eth1: 192.217.1.1/24 | - | Gateway Network 1 |
-| jichi | eth2: 192.217.2.1/24 | - | Gateway Network 2 |
-| jichi | eth3: 192.217.3.1/24 | - | Gateway Network 3 |
-| jichi | eth4: 192.217.4.1/24 | - | Gateway Network 4 |
-| utahime | eth0: 192.217.1.2/24 | 192.217.1.1 | DNS master |
-| shoko | eth0: 192.217.1.3/24 | 192.217.1.1 | DNS slave |
-| gojo | eth0: 192.217.1.4/24 | 192.217.1.1 | Public reverse proxy |
-| tengen | eth0: 192.217.4.10/24 | 192.217.4.1 | DHCP server |
-| geto | eth0: 192.217.4.20/24 | 192.217.4.1 | Internal load balancer |
-| maki | eth0: 192.217.4.21/24 | 192.217.4.1 | Frontend |
-| panda | eth0: 192.217.4.22/24 | 192.217.4.1 | Frontend |
-| nanami | eth0: 192.217.4.31/24 | 192.217.4.1 | API utama |
-| todo | eth0: 192.217.4.32/24 | 192.217.4.1 | API utama |
-| kirara | eth0: 192.217.4.33/24 | 192.217.4.1 | API cadangan |
-| yaga | eth0: 192.217.4.40/24 | 192.217.4.1 | Database master |
-| inumaki | eth0: 192.217.4.41/24 | 192.217.4.1 | Database slave |
-
-### MAC dan kebijakan client
-
-Agar tidak perlu mengisi MAC secara manual, script client **menetapkan MAC lokal berikut pada eth0**. MAC ini berbeda untuk setiap client dan dipakai oleh DHCP class/reservasi. Jangan memakai MAC yang sama pada dua node. Jika panduan ini diterapkan lagi setelah restart client, script menetapkan MAC yang sama.
-
-| Client | MAC eth0 yang ditetapkan | IP yang diperbolehkan sesudah nomor 6 | Lease |
-|---|---|---|---|
-| itadori | 02:12:03:02:00:01 | 192.217.2.10-192.217.2.35 | default 3600, maksimum 7200 detik |
-| fushiguro | 02:12:03:02:00:02 | 192.217.2.10-192.217.2.35 | default 3600, maksimum 7200 detik |
-| zenin | 02:12:03:02:00:03 | 192.217.2.70-192.217.2.95 | default 3600, maksimum 7200 detik |
-| okkotsu | 02:12:03:02:00:04 | 192.217.2.70-192.217.2.95 | default 3600, maksimum 7200 detik |
-| ino | 02:12:03:03:00:01 | 192.217.3.10-192.217.3.89 | 1800 detik |
-| kusakabe | 02:12:03:03:00:02 | 192.217.3.10-192.217.3.89 | 1800 detik |
-| miwa | 02:12:03:03:00:03 | 192.217.3.100-192.217.3.199 | 43200 detik |
-| kugisaki | 02:12:03:03:00:04 | **192.217.3.99**, melalui DHCP | default 3600 detik |
-
-IP client dinamis boleh berbeda dalam rentang yang benar. Jangan mengharuskan Itadori selalu mendapat `.10`. Rentang `192.217.2.36-192.217.2.69` tidak dimasukkan ke pool mana pun. Alamat Kugisaki `.3.99` berada di luar kedua pool Network 3.
-
-## 1. IP statis, IPv4 forwarding, source NAT, dan konektivitas
+## 11. IP statis, IPv4 forwarding, source NAT, dan konektivitas
 
 ### Konfigurasi
 
