@@ -5,48 +5,9 @@
 | Donnavie Aulia                | 5027251093 |
 | Ndaru Satria Tama             | 5027251124 |
 
-## Informasi Umum
 
-| Komponen | Nilai |
-|---|---|
-| Prefix IP | `192.217` |
-| Kelompok | `K12` |
-| Domain | `jujutsu.k12.com` |
-| Image server | `ardhptr21/debinet:latest` |
-| Image client | `ardhptr21/alpinet:latest` |
-| Lokasi script | `/root` pada tiap node, salinan di folder [`script/`](script/) |
-
-## Pemetaan Node
-
-| Node | IP | Peran |
-|---|---|---|
-| jichi | eth0 NAT, eth1–eth4 = `192.217.1.1`–`192.217.4.1` | Router, NAT, DHCP relay |
-| utahime | `192.217.1.2` | DNS Master |
-| shoko | `192.217.1.3` | DNS Slave |
-| gojo | `192.217.1.4` | Public reverse proxy (nginx) |
-| tengen | `192.217.4.10` | DHCP server |
-| geto (hostname `getto`) | `192.217.4.20` | Load balancer internal (nginx) |
-| maki, panda | `192.217.4.21`, `.22` | Worker web frontend |
-| nanami, todo | `192.217.4.31`, `.32` | Worker API utama |
-| kirara | `192.217.4.33` | Worker API cadangan |
-| yaga | `192.217.4.40` | MariaDB Master |
-| inumaki | `192.217.4.41` | MariaDB Slave |
-| itadori, fushiguro, zenin, okkotsu | DHCP `192.217.2.x` | Client Divisi A |
-| ino, kusakabe, miwa, kugisaki | DHCP `192.217.3.x` | Client Divisi B |
-
-Alur request: `client → gojo → (/) maki|panda` dan `client → gojo → (/api) geto → nanami|todo|(kirara) → yaga`.
-
-Container GNS3 tidak menjalankan systemd, sehingga setiap service dikendalikan lewat script kontrol di `/root`:
-
-| Script | Node | Fungsi |
-|---|---|---|
-| `m3-dns-control.sh` | utahime, shoko | start, stop, restart, reload, status BIND9 |
-| `m3-db-control.sh` | yaga, inumaki | start, stop, restart, status MariaDB |
-| `m3-web-control.sh` | gojo, geto, semua worker | start, reload, restart, stop, `stop-nginx`, `stop-fpm`, status |
 
 ## Persiapan sebelum Soal 11
-
-Soal 11–20 bergantung pada hasil soal 1–10 (NAT di jichi, DHCP relay, DHCP server, dan IP client). Jika GNS3 sempat ter-close atau node di-restart, paket dan konfigurasi di `/etc` hilang, sedangkan isi `/root` tetap. Jalankan pemulihan berikut lebih dulu.
 
 #### A. Router dan relay — Jichi
 
